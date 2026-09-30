@@ -26,11 +26,3 @@ Set `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`, and `AWS_REGION`, and mount t
 Clients need a metadata endpoint override, or the deployment must redirect `169.254.169.254` to this listener. This server does not set up networking redirection.
 
 `GET /healthz` checks liveness. `GET /readyz` checks credential availability. Use `imds-credential-server healthcheck` for loopback exec probes. Startup, credential retrieval, and graceful shutdown are bounded; SIGTERM shuts down cleanly.
-
-## Releases
-
-Publish a GitHub release with a version tag such as `v0.5.0`. After CI passes, the workflow publishes both image architectures, SBOM and provenance, and standalone binaries. Stable releases also update `latest`; prereleases do not. Draft releases and tag pushes do not publish anything. Releases remain manual.
-
-After the first publication, open the [package settings](https://github.com/users/glitchedmob/packages/container/package/imds-credential-server) and change its visibility to **Public**. GHCR defaults new packages to private; this one-time UI change has no supported API. Later releases keep that visibility.
-
-CI runs tests, vet, vulnerability checks, and an image build. Dependabot checks dependencies weekly. Run local tests with `go test -race ./...`.
