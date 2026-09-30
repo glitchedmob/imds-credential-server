@@ -15,26 +15,9 @@ Anyone who can reach this listener can obtain its credentials. Keep it pod-local
 
 ## Container image
 
-Release images will be published at `ghcr.io/glitchedmob/imds-credential-server` for `linux/amd64` and `linux/arm64`. The image contains the static binary, CA certificates, and license notices. It runs as UID/GID `65532:65532`, without a shell or writable home directory.
+`ghcr.io/glitchedmob/imds-credential-server:<release-tag>` supports AMD64 and ARM64. The image runs as UID/GID `65532:65532` and contains only the binary, CA certificates, and license notices. Mounted token files must be readable by that UID.
 
-For a pod sidecar, keep the default loopback listener. Mount the projected token file with permissions readable by UID 65532 and set the workload-identity environment variables below. The image's `healthcheck` command supports exec probes without installing curl or a shell.
-
-For a standalone Docker container, opt into a container-network listener and publish it only on host loopback:
-
-```bash
-docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges \
-  -p 127.0.0.1:9911:9911 \
-  -e AWS_REGION -e AWS_ROLE_ARN \
-  -e AWS_WEB_IDENTITY_TOKEN_FILE=/tokens/token \
-  --mount type=bind,src=/path/to/projected-token-directory,dst=/tokens,readonly \
-  ghcr.io/glitchedmob/imds-credential-server:<version> --listen 0.0.0.0:9911
-```
-
-The mounted directory must contain the token file and allow the non-root process to read it. In deployments, pin the image by digest. Binding to `0.0.0.0` makes credentials reachable by other containers on the same Docker network even when the published host port is loopback-only.
-
-Build a local image with `docker build -t imds-credential-server:dev .`. The Docker build context is allowlisted so local AWS configuration and unrelated files cannot enter the image.
-
-Run the image smoke test with `IMDS_TEST_IMAGE=imds-credential-server:dev go test -run '^TestContainer$' ./...`. It checks workload identity, IMDSv2 responses, non-root/read-only operation, health checks, and SIGTERM using synthetic credentials and a local fake STS server. `IMDS_TEST_PLATFORM=linux/arm64` selects an architecture explicitly. Docker Desktop users may need `TMPDIR` to point to a Docker-shared directory for the test token mount.
+Keep the loopback listener for pod sidecars. Standalone Docker port mapping requires `--listen 0.0.0.0:9911`; restrict access to that container network. Build locally with `docker build -t imds-credential-server:dev .`.
 
 ## Workload identity
 
