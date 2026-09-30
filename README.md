@@ -5,8 +5,12 @@ A maintained fork of [benkehoe/imds-credential-server](https://github.com/benkeh
 ## Run
 
 ```sh
-go install github.com/glitchedmob/imds-credential-server@main
-imds-credential-server --listen 127.0.0.1:9911
+docker run --rm --read-only --cap-drop=ALL \
+  -p 127.0.0.1:9911:9911 \
+  -e AWS_REGION -e AWS_ROLE_ARN \
+  -e AWS_WEB_IDENTITY_TOKEN_FILE=/tokens/token \
+  --mount type=bind,src=/path/to/tokens,dst=/tokens,readonly \
+  ghcr.io/glitchedmob/imds-credential-server:<release-tag> --listen 0.0.0.0:9911
 ```
 
 The default listener is `127.0.0.1:9911`. Positional ports and `--port` remain supported. `--profile` selects an optional AWS profile; otherwise the AWS SDK's default credential chain applies. Static IAM user credentials are converted to cached temporary STS credentials. Root identities are rejected.
@@ -15,7 +19,7 @@ Anyone who can reach this listener can obtain its credentials. Keep it pod-local
 
 ## Container image
 
-`ghcr.io/glitchedmob/imds-credential-server:<release-tag>` supports AMD64 and ARM64. The image runs as UID/GID `65532:65532` and contains only the binary, CA certificates, and license notices. Mounted token files must be readable by that UID.
+`ghcr.io/glitchedmob/imds-credential-server:<release-tag>` supports AMD64 and ARM64. The image runs as UID/GID `65532:65532` and includes CA certificates and license notices. Mounted token files must be readable by that UID.
 
 Keep the loopback listener for pod sidecars. Standalone Docker port mapping requires `--listen 0.0.0.0:9911`; restrict access to that container network. Build locally with `docker build -t imds-credential-server:dev .`.
 
@@ -25,4 +29,4 @@ Set `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`, and `AWS_REGION`, and mount t
 
 Clients need a metadata endpoint override, or the deployment must redirect `169.254.169.254` to this listener. This server does not set up networking redirection.
 
-`GET /healthz` checks liveness. `GET /readyz` checks credential availability. Use `imds-credential-server healthcheck` for loopback exec probes. Startup, credential retrieval, and graceful shutdown are bounded; SIGTERM shuts down cleanly.
+`GET /healthz` checks liveness. `GET /readyz` checks credential availability. Use `/imds-credential-server healthcheck` inside the container for loopback exec probes. Startup, credential retrieval, and graceful shutdown are bounded; SIGTERM shuts down cleanly.
