@@ -18,27 +18,21 @@ package main
 import (
 	"context"
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"flag"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
-var Version string = "0.4"
+var Version = "dev"
 
 type innerError struct {
 	Code    string
@@ -58,42 +52,11 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 }
 
 type Config struct {
-	secret        []byte
-	AwsConfig     aws.Config
-	PrincipalArn  string
-	PrincipalName string
-}
-
-func NewConfig(awsCfg aws.Config) *Config {
-	secretBytes := make([]byte, 32)
-	_, err := rand.Read(secretBytes)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	stsClient := sts.NewFromConfig(awsCfg)
-
-	resp, err := stsClient.GetCallerIdentity(context.TODO(), &sts.GetCallerIdentityInput{})
-	if err != nil {
-		log.Fatalf("Call to GetCallerIdentity failed, %v", err)
-	}
-	arn := resp.Arn
-	arnParts := strings.Split(*arn, ":")
-	nameParts := strings.Split(arnParts[len(arnParts)-1], "/")
-	nameType := nameParts[0]
-	var principalName string
-	if nameType == "user" {
-		principalName = nameParts[len(nameParts)-1]
-	} else {
-		principalName = nameParts[1]
-	}
-
-	return &Config{
-		secret:        secretBytes,
-		AwsConfig:     awsCfg,
-		PrincipalArn:  *arn,
-		PrincipalName: principalName,
-	}
+	secret         []byte
+	AwsConfig      aws.Config
+	PrincipalArn   string
+	PrincipalName  string
+	RequestTimeout time.Duration
 }
 
 func (cfg *Config) EncodeToken(ttl time.Duration) []byte {
@@ -237,83 +200,21 @@ type Response struct {
 	Type        string
 }
 
-func generateResponseWithTemporaryCredentials(awsConfig aws.Config) (Response, error) {
-	response := Response{}
-	stsClient := sts.NewFromConfig(awsConfig)
-	sessionCreds, err := stsClient.GetSessionToken(context.TODO(), &sts.GetSessionTokenInput{})
+func (cfg *Config) GenerateResponse(ctx context.Context) (Response, error) {
+	creds, err := cfg.retrieveCredentials(ctx)
 	if err != nil {
-		return response, err
+		return Response{}, err
 	}
-
-	// time.Time has a method of .String() but it returns it in a format we can't use.
-	sessionExpiration, err := sessionCreds.Credentials.Expiration.MarshalText()
-	if err != nil {
-		return response, err
+	expires := creds.Expires
+	if expires.IsZero() {
+		// Environment-provided session credentials have no advertised expiry.
+		expires = time.Now().UTC().Add(time.Hour)
 	}
-
-	lastUpdatedTime := time.Now().UTC()
-	lastUpdated, err := lastUpdatedTime.MarshalText()
-	if err != nil {
-		return response, err
-	}
-
-	response = Response{
-		AccessKeyId:     *sessionCreds.Credentials.AccessKeyId,
-		SecretAccessKey: *sessionCreds.Credentials.SecretAccessKey,
-		Token:           *sessionCreds.Credentials.SessionToken,
-		Expiration:      string(sessionExpiration),
-		Code:            "Success",
-		LastUpdated:     string(lastUpdated),
-		Type:            "AWS-HMAC",
-	}
-
-	return response, nil
-}
-
-func (cfg *Config) GenerateResponse() (Response, error) {
-	response := Response{}
-	awsCreds, err := cfg.AwsConfig.Credentials.Retrieve(context.TODO())
-	if err != nil {
-		return response, err
-	}
-
-	if awsCreds.SessionToken == "" {
-		// Convert static credentials to temporary credentials so the return value
-		// always has a session token and expiration
-		return generateResponseWithTemporaryCredentials(cfg.AwsConfig)
-	}
-
-	// Make sure there's an expiration (even if it's wrong)
-	var expirationTime time.Time
-	if !awsCreds.Expires.IsZero() {
-		expirationTime = awsCreds.Expires
-	} else {
-		expirationTime = time.Now().Add(time.Hour)
-	}
-
-	// time.Time has a method of .String() but it returns it in a format we can't use.
-	expiration, err := expirationTime.MarshalText()
-	if err != nil {
-		return response, err
-	}
-
-	lastUpdatedTime := time.Now().UTC()
-	lastUpdated, err := lastUpdatedTime.MarshalText()
-	if err != nil {
-		return response, err
-	}
-
-	response = Response{
-		AccessKeyId:     awsCreds.AccessKeyID,
-		SecretAccessKey: awsCreds.SecretAccessKey,
-		Token:           awsCreds.SessionToken,
-		Expiration:      string(expiration),
-		LastUpdated:     string(lastUpdated),
-		Code:            "Success",
-		Type:            "AWS-HMAC",
-	}
-
-	return response, nil
+	return Response{
+		AccessKeyId: creds.AccessKeyID, SecretAccessKey: creds.SecretAccessKey,
+		Token: creds.SessionToken, Expiration: expires.UTC().Format(time.RFC3339Nano),
+		Code: "Success", Type: "AWS-HMAC", LastUpdated: time.Now().UTC().Format(time.RFC3339Nano),
+	}, nil
 }
 
 func (cfg *Config) handleCredentialRequest(w http.ResponseWriter, req *http.Request, role string) {
@@ -321,16 +222,16 @@ func (cfg *Config) handleCredentialRequest(w http.ResponseWriter, req *http.Requ
 		writeError(w, http.StatusNotFound, "InvalidRole", "Unknown role name")
 		return
 	}
-	response, err := cfg.GenerateResponse()
+	response, err := cfg.GenerateResponse(req.Context())
 	if err != nil {
-		log.Println(err)
+		log.Print("credential retrieval failed")
 		writeError(w, http.StatusInternalServerError, "InternalServerError", "Something went wrong")
 		return
 	}
 
 	bodyBytes, err := json.Marshal(response)
 	if err != nil {
-		log.Println(err)
+		log.Print("credential response encoding failed")
 		writeError(w, http.StatusInternalServerError, "InternalServerError", "Something went wrong")
 		return
 	}
@@ -348,6 +249,10 @@ const credentialsPath = "/latest/meta-data/iam/security-credentials"
 
 func (cfg *Config) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
+	if req.URL.Path == "/healthz" || req.URL.Path == "/readyz" {
+		cfg.handleHealth(w, req)
+		return
+	}
 	if req.URL.Path == "/latest/api/token" {
 		cfg.handleTokenRequest(w, req)
 	} else if req.URL.Path == credentialsPath || strings.HasPrefix(req.URL.Path, credentialsPath+"/") {
@@ -357,38 +262,18 @@ func (cfg *Config) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func main() {
-	spec := flag.String("port", "", "[HOST:]PORT, can provide as a positional arg")
-	profile := flag.String("profile", "", "A config profile to use")
-	flag.Parse()
-
-	if *spec == "" {
-		*spec = flag.Arg(0)
+func (cfg *Config) handleHealth(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeError(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "Method not allowed")
+		return
 	}
-	if *spec == "" {
-		fmt.Fprintln(os.Stderr, "Error: Port not specified")
-		os.Exit(1)
+	if req.URL.Path == "/readyz" {
+		if _, err := cfg.retrieveCredentials(req.Context()); err != nil {
+			writeError(w, http.StatusServiceUnavailable, "Unavailable", "Credentials are unavailable")
+			return
+		}
 	}
-	if *spec == "version" {
-		fmt.Println(Version)
-		os.Exit(0)
-	}
-	_, err := strconv.Atoi(*spec)
-	if err == nil {
-		*spec = ":" + *spec
-	}
-	if strings.HasPrefix(*spec, ":") {
-		*spec = "localhost" + *spec
-	}
-
-	awsConfig, err := config.LoadDefaultConfig(context.TODO(), config.WithSharedConfigProfile(*profile))
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	config := NewConfig(awsConfig)
-
-	fmt.Printf("Identity: %s\n", config.PrincipalArn)
-
-	log.Fatal(http.ListenAndServe(*spec, config))
+	w.Header().Set("Content-Type", "text/plain")
+	_, _ = io.WriteString(w, "ok\n")
 }

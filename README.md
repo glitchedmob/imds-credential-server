@@ -23,10 +23,10 @@ $ cd imds-credential-server && go build .
 
 
 ## Use
-Run the server in one terminal.
-It needs to have credentials available to it in the normal manner; the `--profile` option works as you'd expect.
+Run the server in one terminal. With no arguments it listens on `127.0.0.1:9911`.
+It uses the AWS SDK's default credential chain. `--profile` selects an optional named profile.
 
-It will bind to localhost by default, if you need something different use the `HOST:PORT` format.
+A bare port binds to loopback. Use `--listen HOST:PORT` to select another address. Anyone who can reach this listener can obtain its credentials. Do not expose it through a public service or ingress.
 ```bash
 $ imds-credential-server 8081
 ```
@@ -43,12 +43,32 @@ $ docker run --rm -p 8081:8081 -e AWS_EC2_METADATA_SERVICE_ENDPOINT=http://host.
 
 ## Details
 
-You must provide a port (or optionally a full address) for the server.
-Then map the port from the host to the container, and set the environment variable `AWS_EC2_METADATA_SERVICE_ENDPOINT` to `http://host.docker.internal:MAPPED_PORT/` with the approporiate port and **remember to include the trailing slash** (the CLI and some SDKs won't work correctly without it).
+The default port is 9911. The positional port and `--port` flag remain supported.
+For host-to-container use, map the chosen port and set the environment variable `AWS_EC2_METADATA_SERVICE_ENDPOINT` to `http://host.docker.internal:MAPPED_PORT/` with the approporiate port and **remember to include the trailing slash** (the CLI and some SDKs won't work correctly without it).
 
 AWS SDKs run inside the container should just work, as should any tool that relies on them.
 For tools that don't correctly accept the full range of AWS credential sources, check out [aws-export-credentials](https://github.com/benkehoe/aws-export-credentials), ideally using it inside the container.
 
-If you're using static credentials from an IAM User or, god forbid, account root, it will use [STS.GetSessionToken](https://docs.aws.amazon.com/STS/latest/APIReference/API_GetSessionToken.html) to turn these into temporary credentials, which both matches IMDSv2 on EC2 (those are always temporary role credentials) and reduces the security risk of providing those credentials.
+For static IAM user credentials, the server uses [STS.GetSessionToken](https://docs.aws.amazon.com/STS/latest/APIReference/API_GetSessionToken.html) and caches the resulting temporary credentials. Root identities are rejected. Existing temporary credentials retain their SDK refresh provider.
 
-You can use `imds-credential-server version` to get the version (this project uses [monotonic versioning](http://blog.appliedcompscilab.com/monotonic_versioning_manifesto/)).
+Use `imds-credential-server version` to print the build version.
+
+## Workload identity
+
+Set `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`, and `AWS_REGION`. Mount the projected token file so the server can read it. The SDK re-reads that file when refreshing credentials. Do not copy its contents into configuration or images.
+
+EC2 metadata is disabled as an upstream credential source by default, preventing the server from recursively querying itself. `--allow-imds` explicitly enables it for use outside this sidecar arrangement.
+
+This server does not intercept traffic to `169.254.169.254`. Clients must support a metadata endpoint override, or the deployment must supply a pod-local networking override. It does not add IAM permissions beyond those of its configured credential source.
+
+## Health and shutdown
+
+- `GET /healthz` checks process liveness without contacting AWS.
+- `GET /readyz` checks credential availability and known expiration. It does not validate authorization to a particular AWS service.
+- `imds-credential-server healthcheck` checks readiness on localhost without loading AWS configuration. Use `--url http://127.0.0.1:9911/healthz` for liveness or to change the address.
+
+Loopback-only listeners require exec probes in Kubernetes. HTTP probes aimed at the pod IP cannot reach them.
+
+Startup validation defaults to 30 seconds. Credential retrieval and AWS HTTP requests default to 10 seconds. The HTTP server limits header reads, request reads, writes, and idle connections. SIGINT and SIGTERM stop accepting connections and drain requests with a 10-second shutdown deadline.
+
+Use `--startup-timeout`, `--credential-timeout`, and `--shutdown-timeout` to change these limits. The credential timeout must be between zero exclusive and one minute inclusive. Temporary credentials without a known expiry, such as environment-supplied session credentials, retain the upstream one-hour advertised-expiration fallback. Prefer refreshable workload identity for long-running deployments.
