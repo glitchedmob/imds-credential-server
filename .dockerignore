@@ -1,0 +1,8 @@
+**
+!Dockerfile
+!go.mod
+!go.sum
+!*.go
+!LICENSE
+!NOTICE
+!CONTRIBUTORS.md
