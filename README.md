@@ -1,5 +1,7 @@
 # imds-credential-server
-**Provide AWS credentials to a container from the host**
+**Serve refreshable AWS credentials through IMDSv2**
+
+This is a maintained fork of [benkehoe/imds-credential-server](https://github.com/benkehoe/imds-credential-server). The original Apache-2.0 license and contributor attribution are retained.
 
 This CLI tool runs a server compliant with the [EC2 IMDSv2 interface](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/configuring-instance-metadata-service.html) in order to vend AWS credentials, primarily to export credentials into locally-run containers.
 
@@ -7,14 +9,14 @@ This is better than mounting your `~/.aws` directory into a container as a) it a
 
 ## Install
 Three options:
-* [Download the latest release](https://github.com/benkehoe/imds-credential-server/releases)
+* [Download the latest release](https://github.com/glitchedmob/imds-credential-server/releases)
 * Use `go install`. [`go install` will install to `$GOBIN` or `$GOPATH/bin` or `$HOME/go/bin`](https://pkg.go.dev/cmd/go#hdr-Compile_and_install_packages_and_dependencies), so ensure that directory is on your `$PATH`.
 ```bash
-$ go install github.com/benkehoe/imds-credential-server@main
+$ go install github.com/glitchedmob/imds-credential-server@main
 ```
 * Clone the repo
 ```bash
-$ git clone https://github.com/benkehoe/imds-credential-server
+$ git clone https://github.com/glitchedmob/imds-credential-server
 $ cd imds-credential-server && go build .
 ```
 
