@@ -1,8 +1,14 @@
 # imds-credential-server
 
-A maintained fork of [benkehoe/imds-credential-server](https://github.com/benkehoe/imds-credential-server). Serves refreshable AWS credentials through IMDSv2, including Kubernetes workload identity. Apache-2.0 licensed.
+Serve AWS credentials through IMDSv2 for applications that only understand EC2 instance metadata. The AWS SDK handles credential lookup and refresh, including Kubernetes workload identity.
 
-## Run
+A maintained fork of [benkehoe/imds-credential-server](https://github.com/benkehoe/imds-credential-server), licensed under [Apache-2.0](LICENSE).
+
+## Container
+
+[GHCR images](https://github.com/glitchedmob/imds-credential-server/pkgs/container/imds-credential-server) support Linux AMD64 and ARM64. The image runs as UID/GID `65532:65532`. Token files must be readable by that user.
+
+For projected-token credentials, export `AWS_ROLE_ARN` and `AWS_REGION`, then mount your token directory:
 
 ```sh
 docker run --rm --read-only --cap-drop=ALL \
@@ -10,23 +16,52 @@ docker run --rm --read-only --cap-drop=ALL \
   -e AWS_REGION -e AWS_ROLE_ARN \
   -e AWS_WEB_IDENTITY_TOKEN_FILE=/tokens/token \
   --mount type=bind,src=/path/to/tokens,dst=/tokens,readonly \
-  ghcr.io/glitchedmob/imds-credential-server:<release-tag> --listen 0.0.0.0:9911
+  ghcr.io/glitchedmob/imds-credential-server:v1.0.1 --listen 0.0.0.0:9911
 ```
 
-The default listener is `127.0.0.1:9911`. Positional ports and `--port` remain supported. `--profile` selects an optional AWS profile; otherwise the AWS SDK's default credential chain applies. Static IAM user credentials are converted to cached temporary STS credentials. Root identities are rejected.
+The default listener is `127.0.0.1:9911`. Clients can override their metadata endpoint to use it. EC2 metadata is disabled as an upstream credential source to avoid recursion.
 
-Anyone who can reach this listener can obtain its credentials. Keep it pod-local. IMDSv2 tokens are not client authentication.
+## Kubernetes sidecar
 
-## Container image
+For clients with a fixed metadata address, add `169.254.169.254` to the pod's loopback interface and serve port `80`. No host or cluster-wide routing changes are needed.
 
-`ghcr.io/glitchedmob/imds-credential-server:<release-tag>` supports AMD64 and ARM64. The image runs as UID/GID `65532:65532` and includes CA certificates and license notices. Mounted token files must be readable by that UID.
+This pod spec fragment uses native sidecars, stable in Kubernetes 1.33+. Configure `aws-workload` as a ServiceAccount with AWS workload identity. Your webhook must inject `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_REGION`, and the projected token mount into `imds`.
 
-Keep the loopback listener for pod sidecars. Standalone Docker port mapping requires `--listen 0.0.0.0:9911`; restrict access to that container network. Build locally with `docker build -t imds-credential-server:dev .`.
+```yaml
+serviceAccountName: aws-workload
+hostNetwork: false
+initContainers:
+  - name: imds-address
+    image: alpine:3.23
+    command: [ip, address, add, 169.254.169.254/32, dev, lo]
+    securityContext:
+      runAsUser: 0
+      runAsNonRoot: false
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: [ALL]
+        add: [NET_ADMIN]
+  - name: imds
+    image: ghcr.io/glitchedmob/imds-credential-server:v1.0.1
+    restartPolicy: Always
+    args: [--listen, "169.254.169.254:80"]
+    startupProbe:
+      exec:
+        command: [/imds-credential-server, healthcheck, --url, "http://169.254.169.254/readyz"]
+      periodSeconds: 2
+      failureThreshold: 30
+    securityContext:
+      runAsNonRoot: true
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: [ALL]
+        add: [NET_BIND_SERVICE]
+containers:
+  - name: app
+    image: your-application:tag
+```
 
-## Workload identity
+The init container needs `NET_ADMIN`, which your cluster's Pod Security policy must permit. The startup probe waits for credentials before the application starts. Do not use `hostNetwork` or expose the server through a Service or Ingress.
 
-Set `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`, and `AWS_REGION`, and mount the projected token file. The SDK re-reads the token when refreshing credentials. EC2 metadata is disabled as an upstream source to prevent recursion; `--allow-imds` enables it explicitly.
-
-Clients need a metadata endpoint override, or the deployment must redirect `169.254.169.254` to this listener. This server does not set up networking redirection.
-
-`GET /healthz` checks liveness. `GET /readyz` checks credential availability. Use `/imds-credential-server healthcheck` inside the container for loopback exec probes. Startup, credential retrieval, and graceful shutdown are bounded; SIGTERM shuts down cleanly.
+Anyone who can reach the listener can obtain its credentials. IMDSv2 tokens are not client authentication. `/healthz` checks the HTTP server, while `/readyz` checks credential availability.
