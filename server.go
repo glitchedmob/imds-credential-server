@@ -17,10 +17,8 @@ import (
 )
 
 type options struct {
-	address, profile                                   string
-	allowIMDS                                          bool
-	credentialTimeout, startupTimeout, shutdownTimeout time.Duration
-	version                                            bool
+	address, profile   string
+	allowIMDS, version bool
 }
 
 func parseOptions(args []string, output io.Writer) (options, error) {
@@ -31,9 +29,6 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 	legacyPort := flags.String("port", "", "legacy [HOST:]PORT alias for --listen")
 	flags.StringVar(&opts.profile, "profile", "", "optional AWS profile, otherwise use the default credential chain")
 	flags.BoolVar(&opts.allowIMDS, "allow-imds", false, "allow EC2 metadata as an upstream credential source")
-	flags.DurationVar(&opts.credentialTimeout, "credential-timeout", defaultCredentialTimeout, "credential retrieval and AWS HTTP request timeout")
-	flags.DurationVar(&opts.startupTimeout, "startup-timeout", 30*time.Second, "AWS startup validation timeout")
-	flags.DurationVar(&opts.shutdownTimeout, "shutdown-timeout", 10*time.Second, "graceful shutdown timeout")
 	if err := flags.Parse(args); err != nil {
 		return opts, err
 	}
@@ -55,9 +50,6 @@ func parseOptions(args []string, output io.Writer) (options, error) {
 	}
 	if flags.NArg() == 1 {
 		opts.address = flags.Arg(0)
-	}
-	if opts.credentialTimeout <= 0 || opts.credentialTimeout > time.Minute || opts.startupTimeout <= 0 || opts.shutdownTimeout <= 0 {
-		return opts, errors.New("timeouts must be positive and credential timeout must not exceed one minute")
 	}
 	address, err := normalizeAddress(opts.address)
 	if err != nil {
@@ -164,13 +156,13 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		_, err := fmt.Fprintln(stdout, Version)
 		return err
 	}
-	startupCtx, cancel := context.WithTimeout(ctx, opts.startupTimeout)
+	startupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	awsCfg, err := loadAWSConfig(startupCtx, opts.profile, opts.allowIMDS, opts.credentialTimeout)
+	awsCfg, err := loadAWSConfig(startupCtx, opts.profile, opts.allowIMDS, defaultCredentialTimeout)
 	if err != nil {
 		return fmt.Errorf("load AWS configuration: %w", err)
 	}
-	cfg, err := NewConfig(startupCtx, awsCfg, opts.credentialTimeout)
+	cfg, err := NewConfig(startupCtx, awsCfg, defaultCredentialTimeout)
 	if err != nil {
 		// Credential-process and upstream errors can contain credential material.
 		return errors.New("AWS startup validation failed; check credentials, workload identity and region")
@@ -182,7 +174,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	defer listener.Close()
 	_, _ = fmt.Fprintf(stderr, "serving IMDS on %s\n", listener.Addr())
-	return serve(ctx, newHTTPServer(opts.address, cfg), listener, opts.shutdownTimeout)
+	return serve(ctx, newHTTPServer(opts.address, cfg), listener, 10*time.Second)
 }
 
 func main() {
