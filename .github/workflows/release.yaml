@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
-      contents: read
+      contents: write
       packages: write
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -47,3 +47,39 @@ jobs:
           build-args: VERSION=${{ github.event.release.tag_name }}
           provenance: mode=max
           sbom: true
+      - name: Add container image links to the release
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          IMAGE_TAGS: ${{ steps.metadata.outputs.tags }}
+        with:
+          script: |
+            const versions = await github.paginate(
+              github.rest.packages.getAllPackageVersionsForPackageOwnedByUser,
+              { username: context.repo.owner, package_type: 'container', package_name: context.repo.repo, per_page: 100 }
+            );
+            const links = process.env.IMAGE_TAGS.trim().split('\n').map(image => {
+              const tag = image.slice(image.lastIndexOf(':') + 1);
+              const version = versions.find(version => version.metadata.container.tags.includes(tag));
+              if (!version) throw new Error(`Published container tag not found: ${tag}`);
+              return `- [\`${image}\`](${version.html_url})`;
+            });
+            const { data: release } = await github.rest.repos.getRelease({
+              ...context.repo,
+              release_id: context.payload.release.id
+            });
+            const section = [
+              '<!-- container-images -->',
+              '## Container images',
+              '',
+              ...links,
+              '',
+              'Supports `linux/amd64` and `linux/arm64`.',
+              '<!-- /container-images -->'
+            ].join('\n');
+            const body = release.body || '';
+            const pattern = /<!-- container-images -->[\s\S]*?<!-- \/container-images -->/;
+            await github.rest.repos.updateRelease({
+              ...context.repo,
+              release_id: release.id,
+              body: pattern.test(body) ? body.replace(pattern, () => section) : [body.trimEnd(), section].filter(Boolean).join('\n\n')
+            });
