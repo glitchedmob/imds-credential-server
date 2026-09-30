@@ -1,4 +1,5 @@
 // Copyright 2020 Ben Kehoe
+// Modified by the glitchedmob fork to support maintained container deployments.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -49,19 +50,11 @@ type errorBody struct {
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
-	w.Header().Add("Content-type", "application/json")
-	w.WriteHeader(http.StatusMethodNotAllowed)
-	errorBody := errorBody{
-		Error: innerError{
-			Code:    code,
-			Message: message,
-		},
-	}
-	bodyBytes, err := json.Marshal(errorBody)
-	if err != nil {
-		log.Fatal(err)
-	}
-	w.Write(bodyBytes)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(errorBody{
+		Error: innerError{Code: code, Message: message},
+	})
 }
 
 type Config struct {
@@ -106,10 +99,7 @@ func NewConfig(awsCfg aws.Config) *Config {
 func (cfg *Config) EncodeToken(ttl time.Duration) []byte {
 	now := time.Now().UTC()
 	expiration := now.Add(ttl)
-	expirationBytes, err := expiration.MarshalText()
-	if err != nil {
-		log.Fatal(err)
-	}
+	expirationBytes := []byte(expiration.Format(time.RFC3339Nano))
 	encodedExpirationStr := base64.URLEncoding.EncodeToString(expirationBytes)
 
 	mac := hmac.New(sha256.New, cfg.secret)
@@ -128,6 +118,9 @@ func (cfg *Config) EncodeToken(ttl time.Duration) []byte {
 }
 
 func (cfg *Config) ValidateToken(token string) error {
+	if len(token) > 512 {
+		return errors.New("The IMDSv2 token is invalid")
+	}
 	parts := strings.Split(token, ".")
 	if len(parts) != 2 {
 		return errors.New("The IMDSv2 token is invalid")
@@ -160,7 +153,7 @@ func (cfg *Config) ValidateToken(token string) error {
 	}
 
 	now := time.Now().UTC()
-	if expiration.Before(now) {
+	if !expiration.After(now) {
 		return errors.New("The IMDSv2 token has expired")
 	}
 
@@ -169,28 +162,25 @@ func (cfg *Config) ValidateToken(token string) error {
 
 func (cfg *Config) handleTokenRequest(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPut {
+		w.Header().Set("Allow", http.MethodPut)
 		writeError(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "Token must be obtained with PUT")
 		return
 	}
 
 	forwardedFor := req.Header.Get("x-forwarded-for")
 	if forwardedFor != "" {
-		writeError(w, http.StatusUnauthorized, "InvalidHeader", "Token requests can't contain X-Forwarded-For")
+		writeError(w, http.StatusForbidden, "InvalidHeader", "Token requests can't contain X-Forwarded-For")
 		return
 	}
 
 	ttlStr := req.Header.Get("x-aws-ec2-metadata-token-ttl-seconds")
 	if ttlStr == "" {
-		writeError(w, http.StatusUnauthorized, "MissingTTL", "The IMDSv2 token expiration header is missing")
+		writeError(w, http.StatusBadRequest, "MissingTTL", "The IMDSv2 token expiration header is missing")
 		return
 	}
 	ttlInt, err := strconv.Atoi(ttlStr)
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, "InvalidTTL", "The IMDSv2 token expiration is invalid")
-		return
-	}
-	if ttlInt <= 0 || ttlInt > 21600 {
-		writeError(w, http.StatusUnauthorized, "InvalidTTL", "The IMDSv2 token expiration is invalid")
+	if err != nil || ttlInt <= 0 || ttlInt > 21600 {
+		writeError(w, http.StatusBadRequest, "InvalidTTL", "The IMDSv2 token expiration is invalid")
 		return
 	}
 	ttl := time.Second * time.Duration(ttlInt)
@@ -205,6 +195,7 @@ func (cfg *Config) handleTokenRequest(w http.ResponseWriter, req *http.Request) 
 
 func (cfg *Config) handleRequest(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
 		writeError(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "Method not allowed")
 		return
 	}
@@ -219,13 +210,12 @@ func (cfg *Config) handleRequest(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if req.URL.Path == "/latest/meta-data/iam/security-credentials/" {
+	if req.URL.Path == credentialsPath || req.URL.Path == credentialsPath+"/" {
 		cfg.handleRoleRequest(w, req)
 		return
-	} else {
-		role := req.URL.Path[len("/latest/meta-data/iam/security-credentials/"):]
-		cfg.handleCredentialRequest(w, req, role)
 	}
+	role := strings.TrimPrefix(req.URL.Path, credentialsPath+"/")
+	cfg.handleCredentialRequest(w, req, role)
 }
 
 func (cfg *Config) handleRoleRequest(w http.ResponseWriter, req *http.Request) {
@@ -327,6 +317,10 @@ func (cfg *Config) GenerateResponse() (Response, error) {
 }
 
 func (cfg *Config) handleCredentialRequest(w http.ResponseWriter, req *http.Request, role string) {
+	if role != cfg.PrincipalName {
+		writeError(w, http.StatusNotFound, "InvalidRole", "Unknown role name")
+		return
+	}
 	response, err := cfg.GenerateResponse()
 	if err != nil {
 		log.Println(err)
@@ -350,11 +344,13 @@ PUT /latest/api/token -> token
 GET /latest/meta-data/iam/security-credentials/ -> role name
 GET /latest/meta-data/iam/security-credentials/{role_name} -> creds
 */
+const credentialsPath = "/latest/meta-data/iam/security-credentials"
+
 func (cfg *Config) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	log.Println(req.Method, req.URL.Path)
+	w.Header().Set("Cache-Control", "no-store")
 	if req.URL.Path == "/latest/api/token" {
 		cfg.handleTokenRequest(w, req)
-	} else if strings.HasPrefix(req.URL.Path, "/latest/meta-data/iam/security-credentials/") {
+	} else if req.URL.Path == credentialsPath || strings.HasPrefix(req.URL.Path, credentialsPath+"/") {
 		cfg.handleRequest(w, req)
 	} else {
 		writeError(w, http.StatusNotFound, "InvalidPath", "Invalid path")
