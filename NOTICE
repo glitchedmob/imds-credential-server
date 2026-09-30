@@ -1,0 +1,8 @@
+imds-credential-server
+
+Derived from https://github.com/benkehoe/imds-credential-server
+Copyright 2020 Ben Kehoe
+
+This fork is maintained at https://github.com/glitchedmob/imds-credential-server.
+It modifies the upstream server for maintained container and sidecar use.
+The original Apache-2.0 license and contributor attribution are retained.

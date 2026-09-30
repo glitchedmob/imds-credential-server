@@ -13,6 +13,12 @@ The default listener is `127.0.0.1:9911`. Positional ports and `--port` remain s
 
 Anyone who can reach this listener can obtain its credentials. Keep it pod-local. IMDSv2 tokens are not client authentication.
 
+## Container image
+
+`ghcr.io/glitchedmob/imds-credential-server:<release-tag>` supports AMD64 and ARM64. The image runs as UID/GID `65532:65532` and contains only the binary, CA certificates, and license notices. Mounted token files must be readable by that UID.
+
+Keep the loopback listener for pod sidecars. Standalone Docker port mapping requires `--listen 0.0.0.0:9911`; restrict access to that container network. Build locally with `docker build -t imds-credential-server:dev .`.
+
 ## Workload identity
 
 Set `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`, and `AWS_REGION`, and mount the projected token file. The SDK re-reads the token when refreshing credentials. EC2 metadata is disabled as an upstream source to prevent recursion; `--allow-imds` enables it explicitly.
